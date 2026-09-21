@@ -1,17 +1,22 @@
 const jwt = require('jsonwebtoken');
 
-module.exports = function (req, res, next) {
-  const token = req.header('Authorization')?.replace('Bearer ', '');
+function authentifizierung(req, res, next) {
+  const [typ, token] = (req.headers.authorization || '').split(' ');
 
-  if (!token) {
-    return res.status(401).json({ nachricht: 'Zugriff verweigert. Kein Token bereitgestellt.' });
+  if (typ !== 'Bearer' || !token) {
+    return res.status(401).json({ nachricht: 'Authentifizierung erforderlich.' });
   }
 
   try {
-    const dekodiert = jwt.verify(token, process.env.JWT_GEHEIMNIS || 'standard_geheimnis');
-    req.benutzer = dekodiert;
-    next();
-  } catch (ex) {
-    res.status(400).json({ nachricht: 'Ungültiges Token.' });
+    const nutzlast = jwt.verify(token, process.env.JWT_SECRET);
+    if (typeof nutzlast !== 'object' || typeof nutzlast.benutzerId !== 'string') {
+      throw new Error('Token enthält keine gültige Benutzer-ID.');
+    }
+    req.benutzerId = nutzlast.benutzerId;
+    return next();
+  } catch {
+    return res.status(401).json({ nachricht: 'Ungültiges oder abgelaufenes Token.' });
   }
-};
+}
+
+module.exports = authentifizierung;

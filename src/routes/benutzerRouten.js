@@ -1,68 +1,120 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const { PrismaClient } = require('@prisma/client');
+const { rateLimit: erstelleRateLimit } = require('express-rate-limit');
+const { GRENZEN, istGueltigeEmail, istObjekt, istText } = require('../validierung');
 
-const router = express.Router();
-const prisma = new PrismaClient();
+function standardRateLimit() {
+  return erstelleRateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 5,
+    standardHeaders: 'draft-8',
+    legacyHeaders: false,
+    handler: (_req, res) => res.status(429).json({
+      nachricht: 'Zu viele Versuche. Bitte in 15 Minuten erneut versuchen.',
+    }),
+  });
+}
 
-// POST /api/benutzer/registrieren - Registrierung eines neuen Benutzers
-router.post('/registrieren', async (req, res) => {
-  try {
-    const { benutzername, email, passwort } = req.body;
+function benutzerRouten(prisma, authentifizierung, rateLimitFactory = standardRateLimit) {
+  const router = express.Router();
+  const registrierungLimit = rateLimitFactory();
+  const loginLimit = rateLimitFactory();
 
-    if (!benutzername || !email || !passwort) {
-      return res.status(400).json({ nachricht: 'Bitte alle Felder ausfüllen.' });
+  router.post('/registrieren', registrierungLimit, async (req, res, next) => {
+    try {
+      if (!istObjekt(req.body)) {
+        return res.status(400).json({ nachricht: 'Der Request-Body muss ein JSON-Objekt sein.' });
+      }
+
+      const { benutzername: roherName, email: roheEmail } = req.body;
+      const passwort = req.body.passwort;
+
+      if (
+        !istText(roherName, { min: 2, max: GRENZEN.benutzername })
+        || !istGueltigeEmail(roheEmail)
+        || !istText(passwort, { min: 8, max: GRENZEN.passwort, trimmen: false })
+      ) {
+        return res.status(400).json({
+          nachricht: 'Ungültige Eingabe: Benutzername 2–50, gültige E-Mail und Passwort 8–128 Zeichen.',
+        });
+      }
+
+      const benutzername = roherName.trim();
+      const email = roheEmail.trim().toLowerCase();
+
+      const vorhanden = await prisma.benutzer.findUnique({ where: { email } });
+      if (vorhanden) {
+        return res.status(409).json({ nachricht: 'Diese E-Mail ist bereits registriert.' });
+      }
+
+      const benutzer = await prisma.benutzer.create({
+        data: {
+          benutzername,
+          email,
+          passwort: await bcrypt.hash(passwort, 12),
+        },
+        select: { id: true, benutzername: true, email: true, erstelltAm: true },
+      });
+
+      return res.status(201).json(benutzer);
+    } catch (fehler) {
+      return next(fehler);
     }
+  });
 
-    const existierenderBenutzer = await prisma.benutzer.findUnique({ where: { email } });
-    if (existierenderBenutzer) {
-      return res.status(400).json({ nachricht: 'Benutzer mit dieser E-Mail existiert bereits.' });
+  router.post('/login', loginLimit, async (req, res, next) => {
+    try {
+      if (!istObjekt(req.body)) {
+        return res.status(400).json({ nachricht: 'Der Request-Body muss ein JSON-Objekt sein.' });
+      }
+
+      const roheEmail = req.body.email;
+      const passwort = req.body.passwort;
+
+      if (
+        !istGueltigeEmail(roheEmail)
+        || !istText(passwort, { min: 1, max: GRENZEN.passwort, trimmen: false })
+      ) {
+        return res.status(400).json({ nachricht: 'E-Mail oder Passwort hat ein ungültiges Format.' });
+      }
+
+      const email = roheEmail.trim().toLowerCase();
+      const benutzer = await prisma.benutzer.findUnique({ where: { email } });
+
+      if (!benutzer || !(await bcrypt.compare(passwort, benutzer.passwort))) {
+        return res.status(401).json({ nachricht: 'E-Mail oder Passwort ist falsch.' });
+      }
+
+      const token = jwt.sign(
+        { benutzerId: benutzer.id, email: benutzer.email },
+        process.env.JWT_SECRET,
+        { expiresIn: '2h' },
+      );
+
+      return res.json({ token, nachricht: 'Erfolgreich angemeldet.' });
+    } catch (fehler) {
+      return next(fehler);
     }
+  });
 
-    const salt = await bcrypt.genSalt(10);
-    const gehachtesPasswort = await bcrypt.hash(passwort, salt);
+  router.get('/profil', authentifizierung, async (req, res, next) => {
+    try {
+      const benutzer = await prisma.benutzer.findUnique({
+        where: { id: req.benutzerId },
+        select: { id: true, benutzername: true, email: true, erstelltAm: true },
+      });
 
-    const neuerBenutzer = await prisma.benutzer.create({
-      data: {
-        benutzername,
-        email,
-        passwort: gehachtesPasswort,
-      },
-      select: { id: true, benutzername: true, email: true, erstelltAm: true },
-    });
-
-    res.status(201).json(neuerBenutzer);
-  } catch (fehler) {
-    res.status(500).json({ nachricht: 'Serverfehler bei der Registrierung.' });
-  }
-});
-
-// POST /api/benutzer/login - Benutzer-Anmeldung
-router.post('/login', async (req, res) => {
-  try {
-    const { email, passwort } = req.body;
-
-    const benutzer = await prisma.benutzer.findUnique({ where: { email } });
-    if (!benutzer) {
-      return res.status(400).json({ nachricht: 'Ungültige E-Mail oder Passwort.' });
+      if (!benutzer) {
+        return res.status(404).json({ nachricht: 'Benutzer nicht gefunden.' });
+      }
+      return res.json(benutzer);
+    } catch (fehler) {
+      return next(fehler);
     }
+  });
 
-    const gueltigesPasswort = await bcrypt.compare(passwort, benutzer.passwort);
-    if (!gueltigesPasswort) {
-      return res.status(400).json({ nachricht: 'Ungültige E-Mail oder Passwort.' });
-    }
+  return router;
+}
 
-    const token = jwt.sign(
-      { id: benutzer.id, email: benutzer.email },
-      process.env.JWT_GEHEIMNIS || 'standard_geheimnis',
-      { expiresIn: '2h' }
-    );
-
-    res.json({ token, nachricht: 'Erfolgreich angemeldet.' });
-  } catch (fehler) {
-    res.status(500).json({ nachricht: 'Serverfehler beim Login.' });
-  }
-});
-
-module.exports = router;
+module.exports = benutzerRouten;

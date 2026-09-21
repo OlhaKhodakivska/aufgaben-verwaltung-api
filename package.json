@@ -1,10 +1,13 @@
 {
   "name": "aufgaben-verwaltung-api",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "REST-API zur Verwaltung persönlicher Aufgaben",
+  "main": "src/index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js",
+    "check": "node --check src/index.js && node --check src/middleware/authentifizierung.js && node --check src/routes/benutzerRouten.js && node --check src/routes/aufgabenRouten.js",
+    "test": "npm run check",
     "postinstall": "prisma skills sync || exit 0"
   },
   "keywords": [],
@@ -12,6 +15,7 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@prisma/adapter-better-sqlite3": "^7.10.0",
     "@prisma/client": "^7.10.0",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.6",
